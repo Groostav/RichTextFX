@@ -12,3 +12,7 @@
 .comment {
     -fx-fill: green;
 }
+.bracket {
+    -fx-fill: blue;
+    -fx-font-weight: bold;
+}

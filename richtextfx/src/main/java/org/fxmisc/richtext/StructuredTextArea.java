@@ -26,6 +26,8 @@ public class StructuredTextArea extends CodeArea {
     private final Class<? extends Lexer>      lexerClass;
     private final Function<Parser, ParseTree> rootProduction;
 
+    private boolean wasSelectingBracketOnLastUpdate = false;
+
     private final RangeMap<Integer, ParserRuleContext> nonterminalsByCharacterIndex = TreeRangeMap.create();
     private final RangeMap<Integer, Token> tokensByCharacterIndex = TreeRangeMap.create();
 
@@ -58,16 +60,12 @@ public class StructuredTextArea extends CodeArea {
         }
 
         caretPositionProperty().addListener((source, oldIndex, newIndex) -> {
-            Token selectedToken = tokensByCharacterIndex.get(newIndex);
-            if(selectedToken == null
-                    || ( ! selectedToken.getText().equals("(") && ! selectedToken.getText().equals(")"))){
-                return;
+            if(wasSelectingBracketOnLastUpdate || isBracket(newIndex)){
+                reApplyStyles();
             }
-            ParserRuleContext selectedNode = nonterminalsByCharacterIndex.get(newIndex);
-            selectedNode.children.stream().
         });
 
-        richChanges().subscribe(this::reApplyStyles);
+        richChanges().subscribe(change -> reApplyStyles());
 
         highlights.addListener((ListChangeListener<ContextualHighlight>) c -> {
             while(c.next()){
@@ -76,7 +74,7 @@ public class StructuredTextArea extends CodeArea {
         });
     }
 
-    private void reApplyStyles(RichTextChange<Collection<String>, Collection<String>> collectionRichTextChange) {
+    private void reApplyStyles() {
 
         ANTLRInputStream antlrStringStream = new ANTLRInputStream(getText());
 
@@ -105,18 +103,34 @@ public class StructuredTextArea extends CodeArea {
 
         List<HighlightedTextInteveral> foundHighlights = new ArrayList<>();
 
-        //act
+        tokensByCharacterIndex.clear();
+        nonterminalsByCharacterIndex.clear();
+
         ParseTreeWalker walker = new ParseTreeWalker();
         ParseTreeListener walkListener = new ParseTreeListener() {
             @Override public void visitTerminal(TerminalNode terminalNode) {
                 Token symbol = terminalNode.getSymbol();
-                Range<Integer> range = Range.closed(symbol.getStartIndex(), symbol.getStopIndex());
-                tokensByCharacterIndex.put(range, symbol);
+                if(symbol.getType() != Token.EOF) {
+                    Range<Integer> range = Range.closed(symbol.getStartIndex(), symbol.getStopIndex());
+                    tokensByCharacterIndex.put(range, symbol);
+                }
             }
-            @Override public void visitErrorNode(ErrorNode errorNode) {}
+            @Override public void visitErrorNode(ErrorNode errorNode) {
+                int x = 4;
+            }
             @Override public void enterEveryRule(ParserRuleContext ctx) {
-                Range<Integer> nonterminalRange = Range.closed(ctx.getStart().getStartIndex(), ctx.getStop().getStopIndex());
-                nonterminalsByCharacterIndex.put(nonterminalRange, ctx);
+
+                int startIndex = ctx.getStart().getStartIndex();
+                int stopIndex = ctx.getStop().getStopIndex();
+
+                // remember we're editing live code,
+                // ANTLRs behaviour when you specify a rule that it cant complete is to give you would-be
+                // tokens as start and stop
+                // we can check for this easily enough
+                if (startIndex < stopIndex) {
+                    Range<Integer> nonterminalRange = Range.closed(startIndex, stopIndex);
+                    nonterminalsByCharacterIndex.put(nonterminalRange, ctx);
+                }
             }
             @Override public void exitEveryRule(ParserRuleContext ctx) {
 
@@ -131,6 +145,7 @@ public class StructuredTextArea extends CodeArea {
         };
         walker.walk(walkListener, expr);
 
+        foundHighlights.addAll(generateBracketHighlights());
         foundHighlights.sort((l, r) -> l.getLowerBound() - r.getLowerBound());
 
         StyleSpansBuilder<Collection<String>> spansBuilder = new StyleSpansBuilder<>();
@@ -146,6 +161,48 @@ public class StructuredTextArea extends CodeArea {
         spansBuilder.add(Collections.emptyList(), getLength() - lastHighlightEnd);
 
         setStyleSpans(0, spansBuilder.create());
+    }
+
+    private Collection<HighlightedTextInteveral> generateBracketHighlights() {
+        int selectedIndex = getCaretPosition();
+
+        if( ! isBracket(selectedIndex)){
+            wasSelectingBracketOnLastUpdate = false;
+            return Collections.emptyList();
+        }
+
+
+        Token selectedToken = tokensByCharacterIndex.get(selectedIndex);
+        ParserRuleContext selectedNode = nonterminalsByCharacterIndex.get(selectedIndex);
+        if(selectedNode == null || selectedToken == null) {
+            wasSelectingBracketOnLastUpdate = false;
+            return Collections.emptyList();
+        }
+
+        String selectedText = selectedToken.getText();
+        String mirrorText = selectedText.equals(")") ? "(" : ")";
+
+        Optional<TerminalNode> possibleTwinNode = selectedNode.children.stream()
+                .filter(TerminalNode.class::isInstance).map(TerminalNode.class::cast)
+                .filter(node -> node.getSymbol().getText().equals(mirrorText))
+                .findFirst();
+
+        wasSelectingBracketOnLastUpdate = possibleTwinNode.isPresent();
+
+        return possibleTwinNode.map(TerminalNode::getSymbol).map(mirror -> Arrays.asList(
+                new HighlightedTextInteveral(selectedToken.getStartIndex(), selectedToken.getStopIndex(), "bracket"),
+                new HighlightedTextInteveral(mirror.getStartIndex(), mirror.getStopIndex(), "bracket")
+        )).orElse(Collections.emptyList());
+    }
+
+    private boolean isBracket(int index) {
+        Token selectedToken = tokensByCharacterIndex.get(index);
+
+        if(selectedToken == null){
+            return false;
+        }
+
+        return "(".equals(selectedToken.getText()) || ")".equals(selectedToken.getText());
     }
 
     public final ObservableList<ContextualHighlight> getHighlights(){
